@@ -1,0 +1,33 @@
+name: Verify CSS build (fork check)
+
+on:
+  push:
+    branches: [ci-verify-fork]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: 'pnpm'
+      - name: Install dependencies
+        run: pnpm i
+      - name: Build the UI package (compiles sass -> postcss-rtlcss -> lightningcss)
+        working-directory: ui
+        run: pnpm build
+      - name: Assert no RTL-flipped QFab horizontal rule in built CSS
+        run: |
+          set -euo pipefail
+          f=$(ls ui/dist/quasar.rtl.prod.css 2>/dev/null || find ui/dist -name '*.rtl*.css' | head -1)
+          echo "Inspecting: $f"
+          test -n "$f" || { echo "no rtl css produced"; exit 1; }
+          if grep -Eo '\[dir=rtl\][^{]*\.q-fab__actions--(right|left)[^{]*\{[^}]*\}' "$f"; then
+            echo "FAIL: RTL-flipped QFab horizontal rule is present (fix not applied)"; exit 1
+          fi
+          echo "PASS: no RTL-flipped QFab horizontal rule; physical placement preserved"
+          grep -Eo '\.q-fab__actions--right\{[^}]*\}' "$f" | head -1
