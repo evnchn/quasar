@@ -35,6 +35,10 @@ describe('[useSize API]', () => {
         const { value } = useSize({ size: 'xs' }, { xs: 55 })
         expect(value.fontSize).toBe('55px')
       })
+      test('treats a CSS string colliding with an Object.prototype key as a raw value', () => {
+        const { value } = useSize({ size: 'toString' })
+        expect(value.fontSize).toBe('toString')
+      })
     })
   })
 })

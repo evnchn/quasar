@@ -17,7 +17,9 @@ export default function useSize(props, sizes = useSizeDefaults) {
   return computed(() =>
     props.size !== void 0
       ? {
-          fontSize: props.size in sizes ? `${sizes[props.size]}px` : props.size
+          fontSize: Object.hasOwn(sizes, props.size)
+            ? `${sizes[props.size]}px`
+            : props.size
         }
       : null
   )
