@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<!--
+MRE — Quasar 2.23.3 — issues 13395 / 17843
+
+A component put into FULLSCREEN while inside a QDialog cannot be focused or typed
+into. The caret never appears and keystrokes are swallowed.
+
+WHY: useFullscreen detaches the component out of the dialog subtree
+(proxy.$el.replaceWith(fillerNode); document.body.append(proxy.$el)). QDialog's focus
+trap then evaluates childHasFocus(innerRef.value, evt.target), which is false for
+everything inside the now-detached fullscreen content, so it yanks focus back to
+.q-dialog__inner on the same focusin turn.
+
+Desktop only — the trap is gated on client.is.desktop, so mobile/touch is unaffected.
+
+RUN: save as .html and open it (or paste into a CodePen with Vue 3 + Quasar UMD).
+  1. Click "open dialog".
+  2. Click "toggle fullscreen".
+  3. Click the text field and type something.
+The banner reports what the field actually received and where focus ended up.
+
+The same field with fullscreen OFF is the passing control: type there first and it
+works, which localizes the cause to the fullscreen detach rather than the dialog.
+-->
+<html>
+<head>
+  <link href="https://cdn.jsdelivr.net/npm/quasar@2.23.3/dist/quasar.prod.css" rel="stylesheet">
+</head>
+<body>
+<div id="q-app">
+  <div class="q-pa-md">
+    <div id="verdict" :class="verdictClass" style="padding:12px;font:13px/1.6 monospace;white-space:pre-line;margin-bottom:12px">{{ verdict }}</div>
+    <q-btn id="open" color="primary" no-caps label="open dialog" @click="dlg = true" />
+
+    <q-dialog v-model="dlg">
+      <q-card style="min-width:520px">
+        <q-card-section class="row items-center q-gutter-sm">
+          <q-btn id="fs" color="secondary" dense no-caps
+                 :label="fs ? 'exit fullscreen' : 'toggle fullscreen'" @click="fs = !fs" />
+          <div class="text-caption">fullscreen: {{ fs }}</div>
+        </q-card-section>
+        <q-card-section>
+          <q-table ref="tbl" v-model:fullscreen="fs" :rows="rows" :columns="cols"
+                   row-key="id" hide-bottom flat bordered>
+            <template v-slot:top>
+              <q-input id="target" v-model="typed" dense outlined autofocus
+                       label="click me and type" style="width:100%" />
+            </template>
+          </q-table>
+        </q-card-section>
+      </q-card>
+    </q-dialog>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/quasar@2.23.3/dist/quasar.umd.prod.js"></script>
+<script>
+Vue.createApp({
+  data: () => ({
+    dlg: false, fs: false, typed: '',
+    cols: [{ name: 'id', label: 'row', field: 'id', align: 'left' }],
+    rows: [{ id: 1 }, { id: 2 }, { id: 3 }],
+    active: '(nothing focused yet)',
+    keys: 0,
+    fail: null
+  }),
+  mounted () {
+    document.addEventListener('keydown', e => {
+      if (e.key.length === 1) { this.keys++; this.evaluate() }
+    })
+    document.addEventListener('focusin', () => {
+      const a = document.activeElement
+      this.active = a.tagName.toLowerCase() +
+        (a.className ? '.' + String(a.className).split(' ').filter(Boolean).slice(0, 2).join('.') : '')
+      this.evaluate()
+    })
+    setInterval(() => this.evaluate(), 400)
+  },
+  methods: {
+    evaluate () {
+      if (this.fs !== true || this.keys === 0) return
+      // invariant: every printable key pressed must reach the field
+      this.fail = this.typed.length < this.keys
+    }
+  },
+  computed: {
+    verdict () {
+      return 'fullscreen: ' + this.fs +
+        '\nfocused element: ' + this.active +
+        '\nprintable keys pressed: ' + this.keys +
+        '\nfield received:  "' + this.typed + '"  (' + this.typed.length + ' chars)' +
+        '\n\n' + (
+          this.fail === true
+            ? '❌ BUG   keystrokes did not reach the field — focus is yanked out of the detached fullscreen node'
+            : this.fail === false
+              ? '✅ ok    every keystroke reached the field'
+              : 'Open the dialog, toggle fullscreen, then click the field and type.'
+        )
+    },
+    verdictClass () {
+      return this.fail === true ? 'bg-red-2 text-red-10'
+        : this.fail === false ? 'bg-green-2 text-green-10' : 'bg-grey-3'
+    }
+  }
+}).use(Quasar).mount('#q-app')
+</script>
+</body>
+</html>

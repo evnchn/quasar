@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<!--
+MRE — Quasar 2.23.3 — issue 18242
+
+QToggle renders as ZERO visible pixels in forced-colors mode (Windows High Contrast).
+
+WHY: the whole control is painted by two properties that forced-colors erases and
+nothing else — .q-toggle__track { opacity:.38; background: currentColor } (no border)
+and .q-toggle__thumb:after { background:#fff; box-shadow: ... } (no border).
+Blink forces background-color -> Canvas AND box-shadow -> none, so track and thumb
+become the page background and the thumb's only edge is deleted.
+
+RUN (needs forced-colors active — pick one):
+  * Windows: Settings > Accessibility > Contrast themes > pick any theme.
+  * Any OS, Chrome/Edge: DevTools > ... > More tools > Rendering >
+    "Emulate CSS media feature forced-colors" = active.
+Then reload this file. The banner self-reports; no eyeballing required.
+
+CHECK: the track's computed background-color must differ from the page background.
+QCheckbox sits beside it as the passing control — same family, still visible,
+because its box has a border that forced-colors keeps.
+
+NOTE on engines: WebKit/Safari reports matchMedia('(forced-colors: active)') as TRUE
+while applying no forcing at all, so a "passes in Safari" reading is a false negative.
+Firefox resolves background:currentColor to CanvasText rather than Canvas, so its
+CHECKED toggles stay visible while UNCHECKED ones fail.
+-->
+<html>
+<head>
+  <link href="https://cdn.jsdelivr.net/npm/quasar@2.23.3/dist/quasar.prod.css" rel="stylesheet">
+</head>
+<body>
+<div id="q-app">
+  <div class="q-pa-md">
+    <div id="verdict" :class="verdictClass" style="padding:12px;font:13px/1.6 monospace;white-space:pre-line;margin-bottom:16px">{{ verdict }}</div>
+
+    <div class="row items-center q-gutter-xl">
+      <div>
+        <div class="text-subtitle2">QToggle — BROKEN</div>
+        <q-toggle id="tg-off" v-model="off" label="unchecked" />
+        <br>
+        <q-toggle id="tg-on" v-model="on" label="checked" />
+      </div>
+      <div>
+        <div class="text-subtitle2">QCheckbox — CONTROL (stays visible)</div>
+        <q-checkbox id="cb-off" v-model="off" label="unchecked" />
+        <br>
+        <q-checkbox id="cb-on" v-model="on" label="checked" />
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/quasar@2.23.3/dist/quasar.umd.prod.js"></script>
+<script>
+Vue.createApp({
+  data: () => ({ off: false, on: true, verdict: 'measuring...', fail: null }),
+  mounted () {
+    setTimeout(() => {
+      const forced = window.matchMedia('(forced-colors: active)').matches
+      // resolve the real page/canvas colour: body computes to transparent, so probe
+      // an element explicitly painted with the Canvas system colour
+      const cv = document.createElement('div')
+      cv.style.backgroundColor = 'Canvas'
+      document.body.appendChild(cv)
+      const pageBg = getComputedStyle(cv).backgroundColor
+      cv.remove()
+      const probe = (sel, part) => {
+        const el = document.querySelector(sel + ' ' + part)
+        if (el === null) return null
+        const cs = getComputedStyle(el)
+        return { bg: cs.backgroundColor, border: cs.borderTopWidth, opacity: cs.opacity }
+      }
+      const rows = [
+        ['QToggle  unchecked', probe('#tg-off', '.q-toggle__track')],
+        ['QToggle  checked  ', probe('#tg-on', '.q-toggle__track')],
+        ['QCheckbox unchecked', probe('#cb-off', '.q-checkbox__bg')],
+        ['QCheckbox checked  ', probe('#cb-on', '.q-checkbox__bg')]
+      ]
+      const out = rows.map(([name, p]) => {
+        if (p === null) return name + '  (not found)'
+        // "invisible" = fill matches the page and there is no border to draw an edge
+        const invisible = p.bg === pageBg && parseFloat(p.border) === 0
+        if (name.indexOf('QToggle') === 0 && invisible) this.fail = true
+        return (invisible ? '❌ INVISIBLE ' : '✅ visible   ') + name +
+          '  bg=' + p.bg + '  border=' + p.border + '  opacity=' + p.opacity
+      })
+      if (this.fail === null) this.fail = false
+      this.verdict =
+        'forced-colors active: ' + forced + (forced ? '' : '   <-- ENABLE IT (see comment at top of file), then reload') + '\n' +
+        'Canvas (page fill):   ' + pageBg + '\n\n' + out.join('\n')
+    }, 300)
+  },
+  computed: {
+    verdictClass () {
+      return this.fail === true ? 'bg-red-2 text-red-10'
+        : this.fail === false ? 'bg-green-2 text-green-10' : 'bg-grey-3'
+    }
+  }
+}).use(Quasar).mount('#q-app')
+</script>
+</body>
+</html>

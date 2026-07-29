@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<!--
+MRE — Quasar 2.23.3 — issue 17848
+
+QInfiniteScroll in REVERSE mode double-compensates the scroll position when new
+items are prepended, so the content visibly jumps by exactly the prepended height
+on every load.
+
+WHY: trigger() reads scrollPosition inside a nextTick — i.e. AFTER Vue has patched
+the DOM — and then adds heightDifference. The browser's CSS scroll anchoring has
+already adjusted scrollTop for that same prepend, so the correction is applied twice.
+
+RUN: save as .html and open it (or paste into a CodePen with Vue 3 + Quasar UMD).
+  Scroll the box UPWARD toward the top (mouse wheel / trackpad). Each load prepends
+  5 items = 500px. The banner reports two independent measurements per load.
+
+*** DO NOT jump the scroll straight to 0 (e.g. scrollTop = 0, Home key). ***
+CSS scroll anchoring only engages when there is content ABOVE the viewport, so
+landing exactly on 0 MASKS this bug entirely and everything reads green. Approach
+the top the way a user does and stop short of it — the load fires at offset 50.
+
+The invariants: (a) the item you were looking at must not move on screen, and
+(b) after prepending 500px the scroll position must grow by exactly 500, not 1000.
+
+IMPORTANT — do not "simplify" this with :key="index". Quasar's own docs example uses
+an index key, and that MASKS this bug completely (the browser cannot anchor to a
+re-keyed node, so the double correction never shows). Stable keys are load-bearing.
+
+Engine note: WebKit does not implement the scroll anchoring involved and is a
+NEGATIVE CONTROL — it shows delta 0 in all configurations, patched or not.
+-->
+<html>
+<head>
+  <link href="https://cdn.jsdelivr.net/npm/quasar@2.23.3/dist/quasar.prod.css" rel="stylesheet">
+  <style>
+    #scroller { height: 400px; overflow: auto; border: 1px solid #bbb; }
+    .item { height: 100px; box-sizing: border-box; border-bottom: 1px solid #eee;
+            display: flex; align-items: center; padding-left: 12px; font: 14px monospace; }
+  </style>
+</head>
+<body>
+<div id="q-app">
+  <div class="q-pa-md">
+    <div id="verdict" :class="verdictClass" style="padding:12px;font:13px/1.6 monospace;white-space:pre-line;margin-bottom:12px">{{ verdict }}</div>
+
+    <div id="scroller">
+      <q-infinite-scroll reverse @load="onLoad" scroll-target="#scroller" :offset="50">
+        <template v-slot:loading>
+          <div class="row justify-center q-my-sm"><q-spinner-dots color="primary" size="24px" /></div>
+        </template>
+        <div v-for="it in items" :key="it.id" :data-id="it.id" class="item">{{ it.label }}</div>
+      </q-infinite-scroll>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/quasar@2.23.3/dist/quasar.umd.prod.js"></script>
+<script>
+let seq = 1000
+Vue.createApp({
+  data: () => ({
+    items: Array.from({ length: 12 }, (_, i) => ({ id: i, label: 'item ' + i })),
+    lines: [],
+    fail: null
+  }),
+  mounted () {
+    this.$nextTick(() => { document.getElementById('scroller').scrollTop = 600 })
+  },
+  methods: {
+    onLoad (index, done) {
+      setTimeout(() => {
+        // anchor on the item currently at the top of the existing list
+        const anchorId = this.items[0].id
+        const rect = () => {
+          const el = document.querySelector('[data-id="' + anchorId + '"]')
+          return el === null ? null : el.getBoundingClientRect().top
+        }
+        const before = rect()
+        const scroller = document.getElementById('scroller')
+        const stBefore = scroller.scrollTop
+        const fresh = Array.from({ length: 5 }, () => {
+          seq += 1
+          return { id: seq, label: 'prepended ' + seq }
+        })
+        this.items.unshift(...fresh)
+        this.$nextTick(() => {
+          done()
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const after = rect()
+            const delta = Math.round(after - before)
+            const stAfter = scroller.scrollTop
+            const stExpected = stBefore + 500
+            const bad = delta !== 0 || stAfter !== stExpected
+            if (bad) this.fail = true
+            else if (this.fail === null) this.fail = false
+            this.lines.push(
+              (bad ? '❌ BUG ' : '✅ ok  ') +
+              ' load #' + (this.lines.length + 1) +
+              '  anchor moved ' + delta + 'px (expected 0)' +
+              '   scrollTop ' + stBefore + ' -> ' + stAfter + ' (expected ' + stExpected + ')')
+          }))
+        })
+      }, 250)
+    }
+  },
+  computed: {
+    verdict () {
+      return 'Scroll the box UPWARD toward the top (do NOT jump to 0 — that masks the bug).\n' +
+        'Invariants: the anchor must not move, and scrollTop must grow by exactly 500.\n\n' +
+        (this.lines.length === 0 ? '(no load yet)' : this.lines.join('\n'))
+    },
+    verdictClass () {
+      return this.fail === true ? 'bg-red-2 text-red-10'
+        : this.fail === false ? 'bg-green-2 text-green-10' : 'bg-grey-3'
+    }
+  }
+}).use(Quasar).mount('#q-app')
+</script>
+</body>
+</html>

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<!--
+MRE — Quasar 2.23.3 — issues 15598 / 17081
+
+Right-clicking a row of a VIRTUAL-SCROLL QTable and closing the context menu
+scrolls the table down by exactly one sticky-header height.
+
+WHY: a row mousedown parks document.activeElement on
+TBODY.q-virtual-scroll__content (it carries tabindex="-1"). QMenu stores that as
+its refocusTarget and, on hide, calls target.focus() with NO options — so the
+browser scroll-into-views the TBODY, which sits under the sticky header.
+
+RUN: save as .html and open it (or paste into a CodePen with Vue 3 + Quasar UMD).
+  1. RIGHT-CLICK any row of the first table.
+  2. Click the menu item (or press Escape).
+The banner reports scrollTop before opening and after closing — they must be equal.
+
+The second table is the identical interaction WITHOUT virtual-scroll — the passing
+control. Only the virtual-scroll one moves, localizing the cause to that tabindex.
+-->
+<html>
+<head>
+  <link href="https://cdn.jsdelivr.net/npm/quasar@2.23.3/dist/quasar.prod.css" rel="stylesheet">
+</head>
+<body>
+<div id="q-app">
+  <div class="q-pa-md">
+    <div id="verdict" :class="verdictClass" style="padding:12px;font:13px/1.6 monospace;white-space:pre-line;margin-bottom:12px">{{ verdict }}</div>
+
+    <div class="text-subtitle2">virtual-scroll — BROKEN (right-click a row)</div>
+    <div class="relative-position">
+    <q-table id="t-virtual" :rows="rows" :columns="cols" row-key="id" virtual-scroll
+             :rows-per-page-options="[0]" hide-bottom style="height:280px" flat bordered>
+    </q-table>
+      <q-menu context-menu @before-show="mark('t-virtual')" @hide="check('t-virtual')">
+        <q-list><q-item clickable v-close-popup><q-item-section>close me</q-item-section></q-item></q-list>
+      </q-menu>
+    </div>
+
+    <div class="text-subtitle2 q-mt-lg">no virtual-scroll — CONTROL, must not move</div>
+    <div class="relative-position">
+    <q-table id="t-plain" :rows="rows.slice(0,30)" :columns="cols" row-key="id"
+             :rows-per-page-options="[0]" hide-bottom style="height:280px" flat bordered>
+    </q-table>
+      <q-menu context-menu @before-show="mark('t-plain')" @hide="check('t-plain')">
+        <q-list><q-item clickable v-close-popup><q-item-section>close me</q-item-section></q-item></q-list>
+      </q-menu>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/quasar@2.23.3/dist/quasar.umd.prod.js"></script>
+<script>
+Vue.createApp({
+  data: () => ({
+    cols: [
+      { name: 'id', label: 'row', field: 'id', align: 'left' },
+      { name: 'v', label: 'value', field: 'v', align: 'left' }
+    ],
+    rows: Array.from({ length: 200 }, (_, i) => ({ id: i, v: 'row ' + i })),
+    before: {},
+    lines: {},
+    verdict: 'RIGHT-CLICK a row of either table, then click the menu item.',
+    fail: null
+  }),
+  methods: {
+    scroller (id) { return document.querySelector('#' + id + ' .q-table__middle') },
+    mark (id) { this.before[id] = this.scroller(id).scrollTop },
+    check (id) {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const after = this.scroller(id).scrollTop
+        const b = this.before[id]
+        const bad = after !== b
+        if (bad) this.fail = true
+        else if (this.fail === null) this.fail = false
+        this.lines[id] = (bad ? '❌ BUG   ' : '✅ ok    ') + id.padEnd(10) +
+          ' scrollTop before=' + b + '  after=' + after + '  delta=' + (after - b) + '   (expected 0)'
+        this.verdict = Object.values(this.lines).join('\n')
+      }))
+    }
+  },
+  computed: {
+    verdictClass () {
+      return this.fail === true ? 'bg-red-2 text-red-10'
+        : this.fail === false ? 'bg-green-2 text-green-10' : 'bg-grey-3'
+    }
+  }
+}).use(Quasar).mount('#q-app')
+</script>
+</body>
+</html>
