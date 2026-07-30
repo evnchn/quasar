@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QTable separator leaks into child tables — self-verdicting MRE (issue 10445)</title>
+<style>
+  body { font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         margin: 0; padding: 16px 20px 60px; background: #fafafa; color: #202124; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #5f6368; margin-bottom: 14px; }
+  #verdict { font: 600 20px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+             padding: 12px 16px; border-radius: 8px; margin: 0 0 6px;
+             background: #eee; border: 2px solid #bbb; }
+  #verdict.pass { background: #e6f4ea; border-color: #137333; color: #0d652d; }
+  #verdict.fail { background: #fce8e6; border-color: #c5221f; color: #a50e0e; }
+  #verdict.error { background: #fef7e0; border-color: #b06000; color: #8a5300; }
+  #meta { font: 12px/1.5 ui-monospace, Menlo, monospace; color: #5f6368; margin-bottom: 16px; }
+  table.report { border-collapse: collapse; font: 12px/1.4 ui-monospace, Menlo, monospace;
+                 background: #fff; margin-bottom: 22px; width: 100%; }
+  table.report th, table.report td { border: 1px solid #dadce0; padding: 3px 7px; text-align: left; }
+  table.report th { background: #f1f3f4; }
+  tr.bad td { background: #fce8e6; }
+  tr.info td { background: #f8f9fa; color: #5f6368; }
+  .grp { font-weight: 600; background: #e8eaed !important; }
+  h2 { font-size: 14px; margin: 22px 0 8px; }
+  .case { margin: 0 0 18px; max-width: 720px; }
+  .case > .lbl { font: 600 12px ui-monospace, Menlo, monospace; color: #5f6368; margin-bottom: 4px; }
+  table.probe { border-collapse: separate; border-spacing: 0; background: #fffde7; }
+  table.probe th, table.probe td { padding: 4px 10px; }
+  #app { margin-top: 24px; }
+  details { margin-bottom: 14px; }
+</style>
+</head>
+<body>
+
+<h1>QTable <code>separator</code> leaks into child tables &mdash; self-verdicting MRE</h1>
+<div class="sub">
+  Quasar issue 10445 &mdash; <em>(css) QTable separator prop affects child tables</em>.
+  This page measures its own borders with <code>getComputedStyle</code> and writes its own verdict.
+  Nothing here needs to be eyeballed.
+</div>
+
+<div id="verdict">running&hellip;</div>
+<div id="meta"></div>
+
+<details>
+  <summary><strong>How to run the A/B</strong></summary>
+  <p>The stylesheet + UMD bundle are chosen by query string:</p>
+  <ul>
+    <li><code>?build=cdn</code> &mdash; Quasar 2.23.3 from jsDelivr (<strong>unpatched upstream; this is the default</strong>) &rarr; expected <strong>FAIL</strong></li>
+    <li><code>?build=dist</code> &mdash; <code>./ui/dist/</code>, i.e. drop this file in the repo root after <code>pnpm build</code></li>
+    <li><code>?build=unpatched</code> / <code>?build=patched</code> &mdash; <code>./dist-unpatched/</code> / <code>./dist-patched/</code> side-by-side local builds</li>
+    <li><code>?base=&lt;any/path/&gt;</code> &mdash; explicit directory holding <code>quasar.prod.css</code> + <code>quasar.umd.prod.js</code></li>
+  </ul>
+  <p>Vue is loaded from <code>./vue.global.prod.js</code> if present, else from jsDelivr.</p>
+</details>
+
+<div id="report"></div>
+<div id="app"></div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * Loader.  NOTE: the Quasar UMD bundle touches document.body while it
+ * evaluates, so every <script> must be injected AFTER the body exists
+ * -- which is why this block sits at the end of <body> and appends to
+ * document.body rather than living in <head>.
+ * ------------------------------------------------------------------ */
+const QS = new URLSearchParams(location.search);
+const BUILD = QS.get('build') || 'cdn';
+const BASES = {
+  cdn:       'https://cdn.jsdelivr.net/npm/quasar@2.23.3/dist/',
+  dist:      './ui/dist/',
+  patched:   './dist-patched/',
+  unpatched: './dist-unpatched/'
+};
+const BASE = QS.get('base') || BASES[BUILD] || BASES.cdn;
+const VUE_LOCAL = QS.get('vue') || './vue.global.prod.js';
+const VUE_CDN = 'https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js';
+
+function loadScript (src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve(src);
+    s.onerror = () => reject(new Error('could not load ' + src));
+    document.body.appendChild(s);
+  });
+}
+function loadCss (href) {
+  return new Promise((resolve, reject) => {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet';
+    l.href = href;
+    l.onload = () => resolve(href);
+    l.onerror = () => reject(new Error('could not load ' + href));
+    document.head.appendChild(l);
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Fixtures
+ * ------------------------------------------------------------------ */
+const SEPS = ['horizontal', 'vertical', 'cell', 'none'];
+
+/* A hand-written table a user drops into a slot. Deliberately carries NO
+   Quasar class -- it must never inherit the parent's separator borders. */
+const NESTED_PLAIN = `
+        <table class="probe">
+          <thead><tr><th class="pth1">plain A</th><th class="pth2">plain B</th></tr></thead>
+          <tbody>
+            <tr><td class="ptd1">1</td><td class="ptd2">2</td></tr>
+            <tr><td>3</td><td>4</td></tr>
+          </tbody>
+        </table>`;
+
+/* A legitimately nested QMarkupTable that asks for its OWN vertical
+   separators. THE TRAP: it must KEEP them whatever the parent says. */
+const NESTED_MARKUP = `
+        <q-markup-table separator="vertical" flat bordered class="mk">
+          <thead><tr><th class="mth1">mk A</th><th class="mth2">mk B</th></tr></thead>
+          <tbody>
+            <tr><td class="mtd1">1</td><td class="mtd2">2</td></tr>
+            <tr><td>3</td><td>4</td></tr>
+          </tbody>
+        </q-markup-table>`;
+
+function qtableOwn (id, sep) {
+  return `
+    <div class="case" id="${ id }">
+      <div class="lbl">${ id } &mdash; QTable separator="${ sep }" (control: its own borders)</div>
+      <q-table :rows="rows" :columns="columns" row-key="c1" separator="${ sep }" flat bordered hide-bottom />
+    </div>`;
+}
+function qtableLeak (id, sep) {
+  return `
+    <div class="case" id="${ id }">
+      <div class="lbl">${ id } &mdash; QTable separator="${ sep }" with a plain &lt;table&gt; in the #body slot</div>
+      <q-table :rows="rows" :columns="columns" row-key="c1" separator="${ sep }" flat bordered hide-bottom>
+        <template #body="props">
+          <q-tr :props="props">
+            <q-td v-for="col in props.cols" :key="col.name" :props="props">{{ col.value }}</q-td>
+          </q-tr>
+          <q-tr :props="props">
+            <q-td colspan="100%">${ NESTED_PLAIN }</q-td>
+          </q-tr>
+        </template>
+      </q-table>
+    </div>`;
+}
+function qtableTrap (id, sep) {
+  return `
+    <div class="case" id="${ id }">
+      <div class="lbl">${ id } &mdash; QTable separator="${ sep }" containing a QMarkupTable separator="vertical" (must KEEP its borders)</div>
+      <q-table :rows="rows" :columns="columns" row-key="c1" separator="${ sep }" flat bordered hide-bottom>
+        <template #body="props">
+          <q-tr :props="props">
+            <q-td v-for="col in props.cols" :key="col.name" :props="props">{{ col.value }}</q-td>
+          </q-tr>
+          <q-tr :props="props">
+            <q-td colspan="100%">${ NESTED_MARKUP }</q-td>
+          </q-tr>
+        </template>
+      </q-table>
+    </div>`;
+}
+function markupOwn (id, sep) {
+  return `
+    <div class="case" id="${ id }">
+      <div class="lbl">${ id } &mdash; QMarkupTable separator="${ sep }" (control: container &gt; table shape)</div>
+      <q-markup-table separator="${ sep }" flat bordered>
+        <thead><tr><th class="oth1">A</th><th class="oth2">B</th><th>C</th></tr></thead>
+        <tbody>
+          <tr><td class="otd1">a1</td><td class="otd2">a2</td><td>a3</td></tr>
+          <tr><td>b1</td><td>b2</td><td>b3</td></tr>
+        </tbody>
+      </q-markup-table>
+    </div>`;
+}
+function markupLeak (id, sep) {
+  return `
+    <div class="case" id="${ id }">
+      <div class="lbl">${ id } &mdash; QMarkupTable separator="${ sep }" wrapping a plain &lt;table&gt;</div>
+      <q-markup-table separator="${ sep }" flat bordered>
+        <thead><tr><th>A</th><th>B</th></tr></thead>
+        <tbody>
+          <tr><td>a1</td><td>a2</td></tr>
+          <tr><td colspan="2">${ NESTED_PLAIN }</td></tr>
+        </tbody>
+      </q-markup-table>
+    </div>`;
+}
+
+const TEMPLATE = `
+  <div>
+    <h2>1. Controls &mdash; each component's own separators must keep working</h2>
+    ${ SEPS.map(s => qtableOwn('ctrl-qtable-' + s, s)).join('') }
+    ${ SEPS.map(s => markupOwn('ctrl-markup-' + s, s)).join('') }
+
+    <h2>2. The bug &mdash; a plain &lt;table&gt; in a slot must NOT inherit borders</h2>
+    ${ SEPS.map(s => qtableLeak('leak-qtable-' + s, s)).join('') }
+    ${ ['horizontal', 'cell'].map(s => markupLeak('leak-markup-' + s, s)).join('') }
+
+    <h2>3. Expand slot</h2>
+    <div class="case" id="leak-expand">
+      <div class="lbl">leak-expand &mdash; QTable separator="cell", plain &lt;table&gt; in the expansion row</div>
+      <q-table :rows="rows" :columns="columns" row-key="c1" separator="cell" flat bordered hide-bottom>
+        <template #header="props">
+          <q-tr :props="props">
+            <q-th auto-width />
+            <q-th v-for="col in props.cols" :key="col.name" :props="props">{{ col.label }}</q-th>
+          </q-tr>
+        </template>
+        <template #body="props">
+          <q-tr :props="props">
+            <q-td auto-width><q-btn size="sm" dense flat label="+" /></q-td>
+            <q-td v-for="col in props.cols" :key="col.name" :props="props">{{ col.value }}</q-td>
+          </q-tr>
+          <q-tr :props="props" class="exp-row">
+            <q-td colspan="100%">${ NESTED_PLAIN }</q-td>
+          </q-tr>
+        </template>
+      </q-table>
+    </div>
+
+    <h2>4. THE TRAP &mdash; a nested QMarkupTable that sets its own separator must KEEP it</h2>
+    ${ SEPS.map(s => qtableTrap('trap-' + s, s)).join('') }
+
+    <h2>5. QTable inside QTable</h2>
+    <div class="case" id="qinq-none-in-cell">
+      <div class="lbl">qinq-none-in-cell &mdash; outer separator="cell", inner QTable separator="none" (inner must have NO borders)</div>
+      <q-table :rows="rows" :columns="columns" row-key="c1" separator="cell" flat bordered hide-bottom>
+        <template #body="props">
+          <q-tr :props="props">
+            <q-td v-for="col in props.cols" :key="col.name" :props="props">{{ col.value }}</q-td>
+          </q-tr>
+          <q-tr :props="props">
+            <q-td colspan="100%">
+              <q-table class="inner" :rows="rows" :columns="columns" row-key="c1"
+                       separator="none" flat bordered hide-bottom />
+            </q-td>
+          </q-tr>
+        </template>
+      </q-table>
+    </div>
+    <div class="case" id="qinq-cell-in-none">
+      <div class="lbl">qinq-cell-in-none &mdash; outer separator="none", inner QTable separator="cell" (inner must KEEP borders)</div>
+      <q-table :rows="rows" :columns="columns" row-key="c1" separator="none" flat bordered hide-bottom>
+        <template #body="props">
+          <q-tr :props="props">
+            <q-td v-for="col in props.cols" :key="col.name" :props="props">{{ col.value }}</q-td>
+          </q-tr>
+          <q-tr :props="props">
+            <q-td colspan="100%">
+              <q-table class="inner" :rows="rows" :columns="columns" row-key="c1"
+                       separator="cell" flat bordered hide-bottom />
+            </q-td>
+          </q-tr>
+        </template>
+      </q-table>
+    </div>
+
+    <h2>6. Informational only (not part of the verdict)</h2>
+    <div class="case" id="info-top">
+      <div class="lbl">info-top &mdash; outer separator="cell", inner QTable separator="none" WITH a title bar</div>
+      <q-table :rows="rows" :columns="columns" row-key="c1" separator="cell" flat bordered hide-bottom>
+        <template #body="props">
+          <q-tr :props="props">
+            <q-td v-for="col in props.cols" :key="col.name" :props="props">{{ col.value }}</q-td>
+          </q-tr>
+          <q-tr :props="props">
+            <q-td colspan="100%">
+              <q-table class="inner" title="inner" :rows="rows" :columns="columns" row-key="c1"
+                       separator="none" flat bordered hide-bottom />
+            </q-td>
+          </q-tr>
+        </template>
+      </q-table>
+    </div>
+  </div>`;
+
+/* ------------------------------------------------------------------ *
+ * Expectations
+ * ------------------------------------------------------------------ */
+/* What a Quasar table's OWN cells should look like for a given separator.
+   thBottom: 'horizontal'/'cell' via `thead th`; 'vertical' via
+   `thead tr:last-child th`. tdBottom only on non-last rows. */
+function ownExpect (sep) {
+  return {
+    thLeft:   (sep === 'vertical' || sep === 'cell') ? 1 : 0,
+    thBottom: (sep === 'none') ? 0 : 1,
+    tdLeft:   (sep === 'vertical' || sep === 'cell') ? 1 : 0,
+    tdBottom: (sep === 'horizontal' || sep === 'cell') ? 1 : 0
+  };
+}
+
+const checks = [];
+function add (group, name, sel, prop, expect, opts) {
+  checks.push(Object.assign({ group, name, sel, prop, expect, info: false }, opts || {}));
+}
+
+/* --- 1. controls: QTable's own borders (container > .q-table__middle > table) --- */
+SEPS.forEach(sep => {
+  const id = '#ctrl-qtable-' + sep;
+  const e = ownExpect(sep);
+  const th = id + ' .q-table__middle > table > thead > tr > th:nth-child(2)';
+  const td = id + ' .q-table__middle > table > tbody > tr:nth-child(1) > td:nth-child(2)';
+  const g = 'control / QTable own borders';
+  add(g, 'ctrl-qtable-' + sep + ' th borderLeft',   th, 'borderLeftWidth',   e.thLeft);
+  add(g, 'ctrl-qtable-' + sep + ' th borderBottom', th, 'borderBottomWidth', e.thBottom);
+  add(g, 'ctrl-qtable-' + sep + ' td borderLeft',   td, 'borderLeftWidth',   e.tdLeft);
+  add(g, 'ctrl-qtable-' + sep + ' td borderBottom', td, 'borderBottomWidth', e.tdBottom);
+});
+
+/* --- 1b. controls: QMarkupTable's own borders (container > table, no __middle) --- */
+SEPS.forEach(sep => {
+  const id = '#ctrl-markup-' + sep;
+  const e = ownExpect(sep);
+  const th = id + ' th.oth2';
+  const td = id + ' td.otd2';
+  const g = 'control / QMarkupTable own borders';
+  add(g, 'ctrl-markup-' + sep + ' th borderLeft',   th, 'borderLeftWidth',   e.thLeft);
+  add(g, 'ctrl-markup-' + sep + ' th borderBottom', th, 'borderBottomWidth', e.thBottom);
+  add(g, 'ctrl-markup-' + sep + ' td borderLeft',   td, 'borderLeftWidth',   e.tdLeft);
+  add(g, 'ctrl-markup-' + sep + ' td borderBottom', td, 'borderBottomWidth', e.tdBottom);
+});
+
+/* --- 2. the bug: plain <table> in a #body slot must stay border-free --- */
+function addPlainProbe (group, prefix, root) {
+  add(group, prefix + ' plain th borderLeft',   root + ' table.probe th.pth2', 'borderLeftWidth',   0);
+  add(group, prefix + ' plain th borderBottom', root + ' table.probe th.pth2', 'borderBottomWidth', 0);
+  add(group, prefix + ' plain td borderLeft',   root + ' table.probe td.ptd2', 'borderLeftWidth',   0);
+  add(group, prefix + ' plain td borderBottom', root + ' table.probe td.ptd2', 'borderBottomWidth', 0);
+}
+SEPS.forEach(sep => {
+  addPlainProbe('BUG / plain table in QTable #body slot',
+    'leak-qtable-' + sep, '#leak-qtable-' + sep);
+});
+['horizontal', 'cell'].forEach(sep => {
+  addPlainProbe('BUG / plain table inside QMarkupTable',
+    'leak-markup-' + sep, '#leak-markup-' + sep);
+});
+
+/* --- 3. expand slot --- */
+addPlainProbe('BUG / plain table in expansion row', 'leak-expand', '#leak-expand');
+
+/* --- 4. THE TRAP: nested QMarkupTable separator="vertical" keeps its borders --- */
+SEPS.forEach(sep => {
+  const id = '#trap-' + sep;
+  const g = 'TRAP / nested QMarkupTable keeps its own separator';
+  add(g, 'trap-' + sep + ' inner th borderLeft',        id + ' .mk th.mth2', 'borderLeftWidth',   1);
+  add(g, 'trap-' + sep + ' inner th borderBottom',      id + ' .mk th.mth2', 'borderBottomWidth', 1);
+  add(g, 'trap-' + sep + ' inner td borderLeft',        id + ' .mk td.mtd2', 'borderLeftWidth',   1);
+  add(g, 'trap-' + sep + ' inner td borderBottom',      id + ' .mk td.mtd2', 'borderBottomWidth', 0);
+  add(g, 'trap-' + sep + ' inner first td borderLeft',  id + ' .mk td.mtd1', 'borderLeftWidth',   0);
+});
+
+/* --- 5. QTable in QTable --- */
+(function () {
+  const g = 'QTable in QTable';
+  let id = '#qinq-none-in-cell';
+  let th = id + ' .inner .q-table__middle > table > thead > tr > th:nth-child(2)';
+  let td = id + ' .inner .q-table__middle > table > tbody > tr:nth-child(1) > td:nth-child(2)';
+  add(g, 'inner none-in-cell th borderLeft',   th, 'borderLeftWidth',   0);
+  add(g, 'inner none-in-cell th borderBottom', th, 'borderBottomWidth', 0);
+  add(g, 'inner none-in-cell td borderLeft',   td, 'borderLeftWidth',   0);
+  add(g, 'inner none-in-cell td borderBottom', td, 'borderBottomWidth', 0);
+
+  id = '#qinq-cell-in-none';
+  th = id + ' .inner .q-table__middle > table > thead > tr > th:nth-child(2)';
+  td = id + ' .inner .q-table__middle > table > tbody > tr:nth-child(1) > td:nth-child(2)';
+  add(g, 'inner cell-in-none th borderLeft',   th, 'borderLeftWidth',   1);
+  add(g, 'inner cell-in-none th borderBottom', th, 'borderBottomWidth', 1);
+  add(g, 'inner cell-in-none td borderLeft',   td, 'borderLeftWidth',   1);
+  add(g, 'inner cell-in-none td borderBottom', td, 'borderBottomWidth', 1);
+})();
+
+/* --- 6. informational: the .q-table__top rule is still a descendant selector --- */
+add('informational (excluded from verdict)',
+  'inner .q-table__top borderBottom (known remaining leak, NOT fixed here)',
+  '#info-top .inner .q-table__top', 'borderBottomWidth', 0, { info: true });
+
+/* ------------------------------------------------------------------ *
+ * Run
+ * ------------------------------------------------------------------ */
+function px (v) { return Number.parseFloat(v) || 0; }
+
+function runChecks () {
+  const results = [];
+  checks.forEach(c => {
+    const el = document.querySelector(c.sel);
+    if (el === null) {
+      results.push(Object.assign({}, c, {
+        actual: null, ok: false, err: 'ELEMENT NOT FOUND'
+      }));
+      return;
+    }
+    const actual = px(getComputedStyle(el)[c.prop]);
+    results.push(Object.assign({}, c, {
+      actual, ok: actual === c.expect, err: null
+    }));
+  });
+  return results;
+}
+
+function render (results) {
+  const scored = results.filter(r => r.info !== true);
+  const bad = scored.filter(r => r.ok !== true);
+  const missing = results.filter(r => r.err !== null).length;
+
+  const v = document.getElementById('verdict');
+  if (missing > 0 && scored.length - bad.length === 0) {
+    v.className = 'error';
+    v.textContent = 'ERROR — nothing could be measured (' + missing +
+      ' selectors matched no element). Did the stylesheet/bundle load?';
+  }
+  else if (bad.length === 0) {
+    v.className = 'pass';
+    v.textContent = 'PASS — ' + scored.length + '/' + scored.length + ' checks correct';
+  }
+  else {
+    v.className = 'fail';
+    v.textContent = 'FAIL — ' + bad.length + '/' + scored.length +
+      ' checks wrong (' + (scored.length - bad.length) + ' correct)';
+  }
+
+  document.getElementById('meta').textContent =
+    'build=' + BUILD + '  base=' + BASE +
+    '  quasar=' + (window.Quasar ? Quasar.version : '?') +
+    '  vue=' + (window.Vue ? Vue.version : '?') +
+    '  ua=' + navigator.userAgent;
+
+  const groups = [];
+  results.forEach(r => { if (groups.indexOf(r.group) === -1) groups.push(r.group); });
+  let html = '<table class="report"><thead><tr><th>check</th><th>property</th>' +
+             '<th>expected</th><th>actual</th><th>result</th></tr></thead><tbody>';
+  groups.forEach(g => {
+    html += '<tr class="grp"><td colspan="5">' + g + '</td></tr>';
+    results.filter(r => r.group === g).forEach(r => {
+      const cls = r.info === true ? 'info' : (r.ok ? '' : 'bad');
+      html += '<tr class="' + cls + '"><td>' + r.name + '</td><td>' + r.prop +
+        '</td><td>' + r.expect + 'px</td><td>' +
+        (r.err !== null ? r.err : r.actual + 'px') + '</td><td>' +
+        (r.info === true ? (r.ok ? 'ok (info)' : 'LEAKS (info)') : (r.ok ? 'ok' : 'WRONG')) +
+        '</td></tr>';
+    });
+  });
+  html += '</tbody></table>';
+  document.getElementById('report').innerHTML = html;
+
+  /* machine-readable payload for the headless harness */
+  const payload = {
+    build: BUILD, base: BASE,
+    quasar: window.Quasar ? Quasar.version : null,
+    verdict: v.className, scored: scored.length,
+    correct: scored.length - bad.length, wrong: bad.length,
+    missingElements: missing,
+    failures: bad.map(r => ({ name: r.name, prop: r.prop, expect: r.expect, actual: r.actual, err: r.err })),
+    informational: results.filter(r => r.info === true)
+      .map(r => ({ name: r.name, expect: r.expect, actual: r.actual, ok: r.ok })),
+    all: results.map(r => ({ group: r.group, name: r.name, prop: r.prop,
+      expect: r.expect, actual: r.actual, ok: r.ok, info: r.info, err: r.err }))
+  };
+  const pre = document.createElement('pre');
+  pre.id = 'results';
+  pre.style.display = 'none';
+  pre.textContent = JSON.stringify(payload, null, 1);
+  document.body.appendChild(pre);
+  window.__MRE_DONE__ = true;
+}
+
+(async function main () {
+  try {
+    await loadCss(BASE + 'quasar.prod.css');
+    try { await loadScript(VUE_LOCAL); }
+    catch (e) { await loadScript(VUE_CDN); }
+    await loadScript(BASE + 'quasar.umd.prod.js');
+
+    const app = Vue.createApp({
+      data () {
+        return {
+          columns: [
+            { name: 'c1', label: 'C1', field: 'c1', align: 'left' },
+            { name: 'c2', label: 'C2', field: 'c2', align: 'left' },
+            { name: 'c3', label: 'C3', field: 'c3', align: 'left' }
+          ],
+          rows: [
+            { c1: 'a1', c2: 'a2', c3: 'a3' },
+            { c1: 'b1', c2: 'b2', c3: 'b3' }
+          ]
+        };
+      },
+      template: TEMPLATE
+    });
+    app.use(Quasar);
+    app.mount('#app');
+
+    /* let layout settle before measuring */
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await new Promise(r => setTimeout(r, 120));
+
+    render(runChecks());
+  }
+  catch (err) {
+    const v = document.getElementById('verdict');
+    v.className = 'error';
+    v.textContent = 'ERROR — ' + err.message;
+    window.__MRE_DONE__ = true;
+    window.__MRE_ERROR__ = err.message;
+  }
+})();
+</script>
+</body>
+</html>
